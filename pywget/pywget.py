@@ -1,17 +1,15 @@
-from re import I
 import click
 import datetime
 import hashlib
 import os
-import regex
+import re as regex
 import requests
 import sys
 import zlib
 from dateutil.parser import parse
 from pathlib import Path, WindowsPath
-from pytz import timezone
 from tqdm import tqdm
-from typing import Union
+from typing import Dict, Tuple, Union
 from urllib.parse import urlparse
 
 
@@ -31,7 +29,7 @@ def get_filename(url: str) -> str:
     return name
 
 
-def append_filename(target: WindowsPath):
+def append_filename(target: WindowsPath) -> WindowsPath:
     cp_count = 1
     while target.exists():
         if cp_count == 1:
@@ -45,7 +43,7 @@ def append_filename(target: WindowsPath):
     return target
 
 
-def hash_filename(link: str, fn: str) -> tuple[str]:
+def hash_filename(link: str, fn: str) -> Tuple[str]:
     crc = crc32_str(link)
     md5 = md5_str(link)
     nm, ext = regex.search("(.*?)(\.[\d\w]{1,6}$)", fn).groups()
@@ -116,6 +114,7 @@ def pywget(
     output = Path(path, fn)
     headers = {}
     writemode = "wb"
+    tz = datetime.datetime.now().astimezone().tzinfo
 
     if output.exists():
         if cont:
@@ -124,11 +123,9 @@ def pywget(
         elif timestamping:
             file_stat = os.stat(output)
             resp = requests.get(url, stream=True, allow_redirects=True)
-            try:
-                modtime = parse(resp.headers["last-modified"]).astimezone(
-                    timezone("America/Chicago")
-                )
-            except KeyError:
+            if "last-modified" in resp.headers.keys():
+                modtime = parse(resp.headers["last-modified"]).astimezone(tz=tz)
+            else:
                 modtime = datetime.datetime.now()
             if file_stat.st_mtime >= modtime.timestamp():
                 print(
@@ -143,22 +140,23 @@ def pywget(
             output = append_filename(output)
 
     os.makedirs(output.parent, exist_ok=True)
-    resp = requests.get(url, stream=True, allow_redirects=True, headers=headers)
-    try:
-        modtime = parse(resp.headers["last-modified"]).astimezone(
-            timezone("America/Chicago")
-        )
-    except KeyError:
-        modtime = datetime.datetime.now()
+    if not "resp" in locals():
+        resp = requests.get(url, stream=True, allow_redirects=True, headers=headers)
 
-    try:
+    if not "modtime" in locals():
+        if "last-modified" in resp.headers.keys():
+            modtime = parse(resp.headers["last-modified"]).astimezone(tz=tz)
+        else:
+            modtime = datetime.datetime.now()
+
+    if "content-length" in resp.headers.keys():
         content_length = int(resp.headers["content-length"])
-    except KeyError:
+    else:
         content_length = None
+
     try:
         with open(output, writemode) as f:
             with tqdm(
-                # total=int(resp.headers["content-length"]),
                 total=content_length,
                 unit="B",
                 unit_scale=True,
@@ -172,7 +170,6 @@ def pywget(
                     pbar.update(len(chunk))
         file_stat = os.stat(output)
         os.utime(output, (file_stat.st_atime, modtime.timestamp()))
-        # fl_out.close()
     except (ConnectionResetError, requests.exceptions.ChunkedEncodingError) as e:
         raise Exception("Connection reset, stopping.")
 
@@ -204,7 +201,7 @@ def cli_pywget(
 ) -> None:
     """
     :param url:
-    URL to download.
+    URL(s) to download.
     :param path:
     Folder to download files to, can be relative or absolute. Accepts pathlib objects.
     :param filename:
@@ -252,13 +249,18 @@ def cli_pywget(
             )
 
 
-def spider(url: str) -> dict:
+def spider(url: str) -> Dict[str, Union[str, int, requests.Response]]:
+    """
+    :param url:
+    URL to get info on.
+
+    Get the filename, size, and modified time of URL.
+    """
     fn = get_filename(url)
     resp = requests.get(url, stream=True, allow_redirects=True)
     size = int(resp.headers["content-length"]) // 1024
-    modtime = parse(resp.headers["last-modified"]).astimezone(
-        timezone("America/Chicago")
-    )
+    tz = datetime.datetime.now().astimezone().tzinfo
+    modtime = parse(resp.headers["last-modified"]).astimezone(tz=tz)
     print(
         f"Filename: {fn}\nSize: {size}kB\nModified: {modtime:%Y-%m-%d %I:%M:%S %p %Z}\n"
     )
